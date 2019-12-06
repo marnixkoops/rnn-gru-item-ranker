@@ -28,7 +28,7 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 # run settings
 DRY_RUN = False  # runs flow on small subset of data for speed and disables mlfow tracking
 LOGGING = True  # mlflow experiment logging
-WEEKS_OF_DATA = 8  # use 1, 2, 3 or 4 weeks worth of data
+WEEKS_OF_DATA = 6  # use 1, 2, 3 or 4 weeks worth of data
 
 # define where we run and on which device (GPU/CPU)
 # GPU_AVAILABLE = tf.test.is_gpu_available(cuda_only=False, min_cuda_compute_capability=None)
@@ -50,19 +50,19 @@ print("🧠 Running TensorFlow version {} on {}".format(tf.__version__, DEVICE))
 
 # data constants
 N_TOP_ITEMS = None  # we have ~1600 product_types currently
-MIN_ITEMS_TRAIN = 3  # sequences with less products (excluding target) are invalid and removed
+MIN_ITEMS_TRAIN = 2  # sequences with less products (excluding target) are invalid and removed
 MIN_ITEMS_TEST = 1  # sequences with less products (excluding target) are invalid and removed
-WINDOW_LEN = 5  # fixed moving window size for generating input-sequence/target rows for training
-PRED_LOOKBACK = 5  # number of most recent products used per sequence in the test set to predict on
+WINDOW_LEN = 6  # fixed moving window size for generating input-sequence/target rows for training
+PRED_LOOKBACK = 6  # number of most recent products used per sequence in the test set to predict on
 TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the probabilities
 
 # model constants
 EMBED_DIM = 24  # number of dimensions for the embeddings
-N_HIDDEN_UNITS = 32  # number of units in the GRU layers
+N_HIDDEN_UNITS = 48  # number of units in the GRU layers
 MAX_EPOCHS = 12  # maximum number of epochs to train for
-BATCH_SIZE = 1280  # batch size for training
-DROPOUT = 0.0  # node dropout
-RECURRENT_DROPOUT = 0.4  # recurrent state dropout during training, fast CuDNN GPU requires 0!
+BATCH_SIZE = 512  # batch size for training
+DROPOUT = 0.2  # node dropout
+RECURRENT_DROPOUT = 0.2  # recurrent state dropout during training, fast CuDNN GPU requires 0!
 LEARNING_RATE = 0.004
 OPTIMIZER = tf.keras.optimizers.Nadam(
     learning_rate=LEARNING_RATE
@@ -149,6 +149,27 @@ elif WEEKS_OF_DATA == 4:
     sequence_df4 = pd.read_csv(DATA_PATH8)
     sequence_df = sequence_df.append(sequence_df2).append(sequence_df3).append(sequence_df4)
     del sequence_df2, sequence_df3, sequence_df4
+elif WEEKS_OF_DATA == 6:
+    sequence_df = pd.read_csv(DATA_PATH1)
+    sequence_df2 = pd.read_csv(DATA_PATH2)
+    sequence_df3 = pd.read_csv(DATA_PATH3)
+    sequence_df4 = pd.read_csv(DATA_PATH4)
+    sequence_df5 = pd.read_csv(DATA_PATH5)
+    sequence_df6 = pd.read_csv(DATA_PATH6)
+    sequence_df = (
+        sequence_df.append(sequence_df2)
+        .append(sequence_df3)
+        .append(sequence_df4)
+        .append(sequence_df5)
+        .append(sequence_df6)
+    )
+    del (
+        sequence_df2,
+        sequence_df3,
+        sequence_df4,
+        sequence_df5,
+        sequence_df6,
+    )
 elif WEEKS_OF_DATA == 8:
     sequence_df = pd.read_csv(DATA_PATH1)
     sequence_df2 = pd.read_csv(DATA_PATH2)
@@ -817,4 +838,4 @@ def sample_random_ranking_cases(cases=1):
         print("\n————————————————————————————————————————————————\n")
 
 
-sample_random_ranking_cases(cases=3)
+sample_random_ranking_cases(cases=2)
