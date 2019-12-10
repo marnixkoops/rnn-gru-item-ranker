@@ -71,7 +71,7 @@ OPTIMIZER = tf.keras.optimizers.Nadam(
 # Automatic FP16 mixed-precision training instead of FP32 for gradients and model weights
 # See: https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html#tensorflow-amp
 # Needs more investigation in terms of speed, gives a warning for memory heavy tensor conversion
-OPTIMIZER = tf.train.experimental.enable_mixed_precision_graph_rewrite(OPTIMIZER)
+# OPTIMIZER = tf.train.experimental.enable_mixed_precision_graph_rewrite(OPTIMIZER)
 
 # training constants
 TRAIN_RATIO = 0.8
@@ -97,28 +97,59 @@ if DRY_RUN:
 ####################################################################################################
 
 
-def load_data():
-    print("     Loading sequence data from Google BigQuery")
+def print_memory_footprint(array):
+    """Prints a statement with the memory size of the input array"""
+    print("     Memory footprint of training array: {:.4} GigaBytes".format(array.nbytes * 1e-9))
+
+
+def downcast_numeric_datatypes(df):
+    float_cols = df.select_dtypes(include=["float"])
+    int_cols = df.select_dtypes(include=["int"])
+
+    for cols in float_cols.columns:
+        df[cols] = pd.to_numeric(df[cols], downcast="float")
+    for cols in int_cols.columns:
+        df[cols] = pd.to_numeric(df[cols], downcast="integer")
+
+    return df
+
+
+def query_product_sequence_data():
+    print("     Downloading sequence data from Google BigQuery")
     query = """
 SELECT
   coolblue_cookie_id,
   visit_date,
   product_sequence
 FROM
-  `coolblue-bi-data-science-prod.recommender_systems.ga_product_sequence`
+  `coolblue-bi-data-science-exp.recommender_systems.ga_product_sequence`
 WHERE
   _PARTITIONTIME IN (
   SELECT
     MAX(_PARTITIONTIME)
   FROM
-    `coolblue-bi-data-science-prod.recommender_systems.ga_product_sequence`)
+    `coolblue-bi-data-science-exp.recommender_systems.ga_product_sequence`)
 """
+    return pd.read_gbq(query, "coolblue-bi-data-science-exp", dialect="standard")
 
-    return pd.read_gbq(query, "coolblue-bi-data-science-prod", dialect="standard")
+
+def query_product_map_data():
+    print("     Downloading product mapping data from Google BigQuery")
+    query = """
+SELECT
+  product_id,
+  product_type_id,
+  product_type_name,
+FROM
+  `coolblue-bi-platform-prod.product.products`
+"""
+    return pd.read_gbq(query, "coolblue-bi-platform-prod", dialect="standard")
 
 
-sequence_df = load_data()
-
+# download data
+sequence_df = query_product_sequence_data()
+product_df = query_product_map_data()
+product_df = downcast_numeric_datatypes(product_df)
 
 sequence_df_len = len(sequence_df)
 sequence_df = sequence_df.drop_duplicates(keep="first")  # also checks for visit_date + id
@@ -127,50 +158,9 @@ MIN_DATE, MAX_DATE = sequence_df["visit_date"].min(), sequence_df["visit_date"].
 print("     Dropped {} duplicate rows".format(sequence_df_len - len(sequence_df)))
 print("     Data contains {} sequences from {} to {}".format(len(sequence_df), MIN_DATE, MAX_DATE))
 
-
 ####################################################################################################
 # 🚀 PREPARE DATA FOR MODELING
 ####################################################################################################
-
-t_prep = time.time()  # start timer for preparing data
-
-
-def print_memory_footprint(array):
-    """Prints a statement with the memory size of the input array"""
-    print("     Memory footprint of array: {:.4} MegaBytes".format(array.nbytes * 1e-6))
-
-
-print("\n💾 Processing data")
-print("     Tokenizing, padding, filtering & splitting sequences")
-# define product_to_pt_tokenizer to encode sequences and include N most popular items (occurence)
-product_to_pt_map_dict = dict(
-    zip(product_map_df["product_id"].astype(str), product_map_df["product_type_id"].astype(str))
-)
-product_to_pt_tokenizer = keras.preprocessing.text.Tokenizer()
-product_to_pt_tokenizer.word_index = product_to_pt_map_dict
-# product_to_pt_tokenizer.fit_on_texts(sequence_df["product_sequence"])  # encode string sequences
-sequences = product_to_pt_tokenizer.texts_to_sequences(sequence_df["product_sequence"])
-del sequence_df
-gc.collect()
-
-# tokenize product_types to encode sequences from 1 to N
-tokenizer = keras.preprocessing.text.Tokenizer()
-tokenizer.fit_on_texts(sequences)
-sequences = tokenizer.texts_to_sequences(sequences)
-
-# pre-pad sequences with 0's, length is based on longest present sequence
-# this is required to transform the variable length sequences into equal train/test pairs
-padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, padding="pre")
-print_memory_footprint(padded_sequences)
-del sequences
-gc.collect()
-
-# split into train/test subsets before reshaping sequence for training/validation
-# (since we subsample longer sequences of a single customer into multiple train/validation pairs,
-# while we do not wish to predict on multiple sequences of a single customer
-test_index = int(TEST_RATIO * len(padded_sequences))
-padded_sequences_train = padded_sequences[:-test_index].copy()
-padded_sequences_test = padded_sequences[-test_index:].copy()
 
 
 def filter_valid_sequences(array, min_items=MIN_ITEMS_TRAIN):
@@ -190,39 +180,6 @@ def filter_valid_sequences(array, min_items=MIN_ITEMS_TRAIN):
     print("     Removed {} invalid sequences".format(pre_len - len(valid_sequences)))
     print("     Kept {} valid sequences".format(len(valid_sequences)))
     return valid_sequences
-
-
-padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
-padded_sequences_test = filter_valid_sequences(padded_sequences_test, min_items=MIN_ITEMS_TEST)
-
-# determine most popular items, to be used in evaluation as baseline
-unique, counts = np.unique(padded_sequences_train, return_counts=True)
-frequency_dict = dict(zip(unique, counts))
-pop_products = list(sorted(frequency_dict, key=frequency_dict.get, reverse=True))[1:11]
-
-# how many items there are for the input layer
-n_included_pt = len(tokenizer.word_index.values())
-N_TOP_ITEMS = n_included_pt + 1
-
-print("\n     Unique items present in the data: {}".format(N_TOP_ITEMS))
-print("     Training & evaluating model on {} sequences".format(len(padded_sequences_train)))
-print("     Testing recommendations on {} sequences".format(len(padded_sequences_test)))
-print_memory_footprint(padded_sequences_train)
-print_memory_footprint(padded_sequences_test)
-
-# generate a dictionary with unique value counts to be used as class_weight in model fit
-# the idea is to combat against bias due to highly imbalanced training data
-if DATA_IMBALANCE_CORRECTION:
-    print("     Generating product occurence dictionary to be used as class weights against bias")
-    product_token, product_count = np.unique(padded_sequences_train, return_counts=True)
-    product_count_dict = dict(zip(product_token, product_count))
-    del product_count_dict[0]  # drop 0 token, which is padding and not a product
-else:
-    product_count_dict = None
-
-# clean up memory
-del padded_sequences
-gc.collect()
 
 
 # generate subsequences from longer sequences with a moving window for model training
@@ -266,6 +223,72 @@ def filter_repeated_unique_sequences(array, min_items=1):
     )
     print("     Kept {} valid sequences".format(len(valid_sequences)))
     return valid_sequences
+
+
+t_prep = time.time()  # start timer for preparing data
+
+print("\n💾 Processing data")
+print("     Tokenizing, padding, filtering & splitting sequences")
+# define product_to_pt_tokenizer to encode sequences and include N most popular items (occurence)
+product_to_pt_map_dict = dict(
+    zip(product_df["product_id"].astype(str), product_df["product_type_id"].astype(str))
+)
+product_to_pt_tokenizer = keras.preprocessing.text.Tokenizer()
+product_to_pt_tokenizer.word_index = product_to_pt_map_dict
+# product_to_pt_tokenizer.fit_on_texts(sequence_df["product_sequence"])  # encode string sequences
+sequences = product_to_pt_tokenizer.texts_to_sequences(sequence_df["product_sequence"])
+del sequence_df
+gc.collect()
+
+# tokenize product_types to encode sequences from 1 to N
+tokenizer = keras.preprocessing.text.Tokenizer()
+tokenizer.fit_on_texts(sequences)
+sequences = tokenizer.texts_to_sequences(sequences)
+
+# pre-pad sequences with 0's, length is based on longest present sequence
+# this is required to transform the variable length sequences into equal train/test pairs
+padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, padding="pre")
+print_memory_footprint(padded_sequences)
+del sequences
+gc.collect()
+
+# split into train/test subsets before reshaping sequence for training/validation
+# (since we subsample longer sequences of a single customer into multiple train/validation pairs,
+# while we do not wish to predict on multiple sequences of a single customer
+test_index = int(TEST_RATIO * len(padded_sequences))
+padded_sequences_train = padded_sequences[:-test_index].copy()
+padded_sequences_test = padded_sequences[-test_index:].copy()
+
+padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
+padded_sequences_test = filter_valid_sequences(padded_sequences_test, min_items=MIN_ITEMS_TEST)
+
+# determine most popular items, to be used in evaluation as baseline
+unique, counts = np.unique(padded_sequences_train, return_counts=True)
+frequency_dict = dict(zip(unique, counts))
+pop_products = list(sorted(frequency_dict, key=frequency_dict.get, reverse=True))[1:11]
+
+# how many items there are for the input layer
+n_included_pt = len(tokenizer.word_index.values())
+N_TOP_ITEMS = n_included_pt + 1
+
+print("\n     Unique items present in the data: {}".format(N_TOP_ITEMS))
+print("     Training & evaluating model on {} sequences".format(len(padded_sequences_train)))
+print("     Testing recommendations on {} sequences".format(len(padded_sequences_test)))
+print_memory_footprint(padded_sequences_train)
+
+# generate a dictionary with unique value counts to be used as class_weight in model fit
+# the idea is to combat against bias due to highly imbalanced training data
+if DATA_IMBALANCE_CORRECTION:
+    print("     Generating product occurence dictionary to be used as class weights against bias")
+    product_token, product_count = np.unique(padded_sequences_train, return_counts=True)
+    product_count_dict = dict(zip(product_token, product_count))
+    del product_count_dict[0]  # drop 0 token, which is padding and not a product
+else:
+    product_count_dict = None
+
+# clean up memory
+del padded_sequences
+gc.collect()
 
 
 # generate sliding window of sequences with x=WINDOW_LEN input products and y=1 target product
@@ -425,12 +448,12 @@ gc.collect()
 
 
 ####################################################################################################
-# 🚀 CREATE RANKINGS
+# 🚀 CREATE PREDICTIONS
 ####################################################################################################
 
-print("\n🧠 Evaluating ranking of network")
+print("\n🧠 Evaluating predictions of network")
 t_pred = time.time()  # start timer for predictions
-print("     Creating ranking on test set")
+print("     Creating predictions on test set")
 
 
 def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
@@ -439,10 +462,10 @@ def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
     Output positions are based on probability from high to low so the output sequence is ordered.
     To be used for obtaining multiple product ranked and calculating MAP@K values.
     Args:
-        y_pred_probs (array): Predicted probabilities for all included products.
-        output_length (int): Number of top K products to extract from the prediction array.
+        y_pred_probs (array): Predicted probabilities for all included items.
+        output_length (int): Number of top K items to extract from the prediction array.
     Returns:
-        array: Product ranking matrix with shape [X_test, output_length]
+        array: Predictions matrix with shape [X_test, output_length]
     """
     # obtain indices of highest logit values, the position corresponds to the encoded item
     ind_of_max_logits = np.argpartition(y_pred_probs, -output_length)[-output_length:]
@@ -452,12 +475,12 @@ def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
     return ordered_predicted_sequences
 
 
-# model.predict occasionaly leads to memory leaking issues when input data is large (10K+ products).
+# model.predict occasionaly leads to memory leaking issues when input data is large.
 # issue is known and should be fixed soon: https://github.com/keras-team/keras/issues/13118 and
 # https://github.com/tensorflow/tensorflow/issues/33009
 # y_pred_probs = model.predict(X_test, batch_size=BATCH_SIZE)
 
-# predict in multiple batches to fit in GPU memory (array is 4 bytes * sequences * products = big)
+# predict in multiple batches to fit in GPU memory (array is 4 bytes * sequences * items = big)
 dividing_row = len(X_test) // 3
 remainder_due_to_batch_size = dividing_row % BATCH_SIZE  # needs to fit into BATCH_SIZE
 dividing_row = dividing_row - remainder_due_to_batch_size
@@ -694,7 +717,7 @@ if LOGGING and not DRY_RUN:
     mlflow.log_metric("Pred secs", np.round(pred_time))
 
     # Log artifacts
-    mlflow.log_artifact("./gru_pt_keras_embedding.py")  # log executed code
+    mlflow.log_artifact("./gru_pt_keras_cloud.py")  # log executed code
     mlflow.log_artifact("./plots/validation_plots.png")  # log validation plots
     file = ".model_config.txt"  # log detailed model settings
     with open(file, "w") as model_config:
@@ -705,95 +728,3 @@ if LOGGING and not DRY_RUN:
 
 print("✅ All done, total elapsed time: {:.3} minutes".format((time.time() - t_prep) / 60))
 gc.collect()
-
-
-####################################################################################################
-# 🚀 INVESTIGATE RANKINGS
-####################################################################################################
-
-# create dictionary to map tokens back to item_id
-token_item_map_dict = {token: int(item) for token, item in tokenizer.index_word.items()}
-
-# create dictionary to map item_id to item names
-item_name_map_df = product_map_df[["product_type_id", "product_type_name"]].drop_duplicates()
-item_name_map_df = dict(
-    zip(item_name_map_df["product_type_id"], item_name_map_df["product_type_name"])
-)
-
-# map back from token to item_id ints
-tokens = np.array(list(token_item_map_dict.keys()))
-item_ids = np.array(list(token_item_map_dict.values()))
-mapping_ar = np.zeros(tokens.max() + 1, dtype=item_ids.dtype)
-mapping_ar[tokens] = item_ids
-input_items = mapping_ar[X_test]  # map back predicted items
-actual_items = mapping_ar[y_test]  # map back actualitems
-predicted_items = mapping_ar[predicted_sequences]  # map back predicted items
-
-# create dictionary to map item_id to item names
-item_name_map_df = product_map_df[["product_type_id", "product_type_name"]].drop_duplicates()
-item_name_map_df = dict(
-    zip(item_name_map_df["product_type_id"], item_name_map_df["product_type_name"])
-)
-item_ids = np.array(list(item_name_map_df.keys()))
-names = np.array(list(item_name_map_df.values()))
-item_name_mapping_ar = np.zeros(item_ids.max() + 1, dtype=names.dtype)  # k,v from approach #1
-item_name_mapping_ar[item_ids] = names
-
-
-def sample_random_ranking_cases(cases=1):
-
-    for i in np.arange(cases):
-        random_sequence_index = np.random.randint(low=1, high=N_TOP_ITEMS)
-        X = input_items[random_sequence_index]
-        y = actual_items[random_sequence_index]
-        y_pred = predicted_items[random_sequence_index]
-
-        X_names = item_name_mapping_ar[X]
-        y_names = item_name_mapping_ar[y][:10]
-        y_pred_names = item_name_mapping_ar[y_pred]
-
-        print("User input session items: \n   {}".format(X_names))
-        print("\nPersonalized top 10 ranked items: \n   {}".format(y_pred_names))
-        print("\nActual next item in user session: \n   {}".format(y_names))
-        print("\n————————————————————————————————————————————————\n")
-
-
-sample_random_ranking_cases(cases=2)
-
-####################################################################################################
-
-# import altair
-#
-#
-# counts = np.bincount(y_test.flatten())
-# non_zeros = np.nonzero(counts)[0]
-# token_counts = list(zip(non_zeros, counts[non_zeros]))
-# token_counts_df = pd.DataFrame(token_counts[0:50])
-# token_counts_df.columns = ["token", "actual_count"]
-#
-# bars = (
-#     altair.Chart(token_counts_df, title="Item Frequency Counts")
-#     .mark_bar()
-#     .encode(x="count:Q", y="token:O")
-# )
-# text = bars.mark_text(align="left", baseline="middle", dx=3).encode(text="count:Q")
-# (bars + text).properties(height=900).configure(background="#DDEEFF")
-#
-# counts = np.bincount(predicted_sequences[:, 1].flatten())
-# non_zeros = np.nonzero(counts)[0]
-# token_counts = list(zip(non_zeros, counts[non_zeros]))
-# token_counts_df_pred = pd.DataFrame(token_counts[0:50])
-# token_counts_df_pred.columns = ["token", "pred_count"]
-#
-# token_counts_df = token_counts_df.merge(token_counts_df_pred)
-# token_counts_df = pd.melt(
-#     token_counts_df, id_vars="token", value_vars=["actual_count", "pred_count"]
-# )
-#
-# bars = (
-#     altair.Chart(token_counts_df, title="Item Frequency Counts")
-#     .mark_bar()
-#     .encode(x="value:Q", y="token:O", color="variable")
-# )
-# text = bars.mark_text(align="left", baseline="middle", dx=3).encode(text="value:Q")
-# (bars + text).properties(height=900, width=400).configure(background="#DDEEFF")
