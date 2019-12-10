@@ -8,6 +8,8 @@ import gc
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.python.client import device_lib
+from tensorflow.compat.v1 import ConfigProto
+from tensorflow.compat.v1 import InteractiveSession
 
 import mlflow
 from ml_metrics import average_precision
@@ -31,20 +33,36 @@ LOGGING = True  # mlflow experiment logging
 WEEKS_OF_DATA = 6  # how many weeks of data to use [1, 8]
 
 # define where we run and on which device (GPU/CPU)
+# force memory growth options to avoid memory allocation issues on the GPU
 # GPU_AVAILABLE = tf.test.is_gpu_available(cuda_only=False, min_cuda_compute_capability=None)
 all_devices = str(device_lib.list_local_devices())
 gpu_devices = tf.config.experimental.list_physical_devices("GPU")
 if "Tesla P100" in all_devices:
     DEVICE = "Tesla P100 GPU"
     MACHINE = "cloud"
-    # tf.config.experimental.set_memory_growth(gpu_devices[0], True)  # no allocating memory upfront
+    tf.config.experimental.set_memory_growth(gpu_devices[0], True)  # no allocating memory upfront
+    tf.config.experimental.set_virtual_device_configuration(
+        gpu_devices[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]
+    )
+    config = ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.8
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
 elif "GPU" in all_devices:
     DEVICE = "GPU"
     MACHINE = "cloud"
-    # tf.config.experimental.set_memory_growth(gpu_devices[0], True)
+    tf.config.experimental.set_memory_growth(gpu_devices[0], True)
+    tf.config.experimental.set_virtual_device_configuration(
+        gpu_devices[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]
+    )
+    config = ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.8
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
 elif "CPU" in all_devices:
     DEVICE = "CPU"
     MACHINE = "local"
+
 
 print("🧠 Running TensorFlow version {} on {}".format(tf.__version__, DEVICE))
 
@@ -52,17 +70,17 @@ print("🧠 Running TensorFlow version {} on {}".format(tf.__version__, DEVICE))
 N_TOP_ITEMS = None  # None will yield all items available in the data, there are ~1650 PTs
 MIN_ITEMS_TRAIN = 2  # sequences with less products (excluding target) are invalid and removed
 MIN_ITEMS_TEST = 1  # sequences with less products (excluding target) are invalid and removed
-WINDOW_LEN = 6  # fixed moving window size for generating input-sequence/target rows for training
+WINDOW_LEN = 4  # fixed moving window size for generating input-sequence/target rows for training
 PRED_LOOKBACK = 6  # number of most recent products used per sequence in the test set to predict on
 TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the probabilities
 
 # model constants
 EMBED_DIM = 32  # number of dimensions for the embeddings
-N_HIDDEN_UNITS = 64  # number of units in the GRU layers
+N_HIDDEN_UNITS = 48  # number of units in the GRU layers
 MAX_EPOCHS = 12  # maximum number of epochs to train for
-BATCH_SIZE = 1024  # batch size for training
-DROPOUT = 0.2  # node dropout
-RECURRENT_DROPOUT = 0.2  # recurrent state dropout during training, fast CuDNN GPU requires 0!
+BATCH_SIZE = 512  # batch size for training
+DROPOUT = 0.15  # node dropout
+RECURRENT_DROPOUT = 0.15  # recurrent state dropout during training, fast CuDNN GPU requires 0!
 LEARNING_RATE = 0.002
 OPTIMIZER = tf.keras.optimizers.Nadam(
     learning_rate=LEARNING_RATE
@@ -76,7 +94,7 @@ OPTIMIZER = tf.keras.optimizers.Nadam(
 # training constants
 SHUFFLE_TRAIN_SET = True  # shuffles the training sequences (row-wise), seems smart for training
 DATA_IMBALANCE_CORRECTION = False  # Supply product weights during model training to avoid bias
-FILTER_REPEATED_UNIQUES = False  # Filters sequences with only 1 unique item e.g. [1, 1, 1, 1, 1]
+FILTER_REPEATED_UNIQUES = True  # Filters sequences with only 1 unique item e.g. [1, 1, 1, 1, 1]
 
 # dry run constants for development and debugging
 if DRY_RUN:
@@ -89,6 +107,21 @@ if DRY_RUN:
     LEARNING_RATE = 0.01
 
 
+# GOOD ONES FOR PT SO FAR
+# MIN_ITEMS_TRAIN = 2
+# MIN_ITEMS_TEST = 1
+# WINDOW_LEN = 4
+# PRED_LOOKBACK = 6
+# TOP_K_OUTPUT_LEN = 12
+# EMBED_DIM = 32
+# N_HIDDEN_UNITS = 48
+# MAX_EPOCHS = 12
+# BATCH_SIZE = 512
+# DROPOUT = 0.15
+# RECURRENT_DROPOUT = 0.15
+# LEARNING_RATE = 0.002
+
+
 ####################################################################################################
 # 🚀 LOCAL INPUT DATA
 ####################################################################################################
@@ -98,31 +131,15 @@ print("     Using DRY_RUN: {} and {} weeks of data".format(DRY_RUN, WEEKS_OF_DAT
 print("     Reading raw input sequence data from disk")
 
 # input data
-product_map_df = pd.read_csv("./data/product_mapping.csv")
-DATA_PATH1 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191013.csv"
-)
-DATA_PATH2 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191020.csv"
-)
-DATA_PATH3 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191027.csv"
-)
-DATA_PATH4 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191103.csv"
-)
-DATA_PATH5 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191110.csv"
-)
-DATA_PATH6 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191117.csv"
-)
-DATA_PATH7 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191124.csv"
-)
-DATA_PATH8 = (
-    "/Users/marnix.koops/Projects/marnix-single-flow-rnn/data/ga_product_sequence_20191201.csv"
-)
+product_map_df = pd.read_csv("/home/marnix.koops/gru-item-ranker/data/product_mapping.csv")
+DATA_PATH1 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191013.csv"
+DATA_PATH2 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191020.csv"
+DATA_PATH3 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191027.csv"
+DATA_PATH4 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191103.csv"
+DATA_PATH5 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191110.csv"
+DATA_PATH6 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191117.csv"
+DATA_PATH7 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191124.csv"
+DATA_PATH8 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191201.csv"
 
 if DRY_RUN:
     sequence_df = pd.read_csv(DATA_PATH4)
@@ -230,7 +247,7 @@ def filter_valid_sequences(array, min_items=MIN_ITEMS_TRAIN):
     pre_len = len(array)
     array = array[array[:, -1] != 0]  # ending in 0 is a duplicate subsequence or empty sequence
     min_product_mask = np.sum((array != 0), axis=1) >= min_items  # create mask for min products
-    valid_sequences = array[min_product_mask].copy()
+    valid_sequences = array[min_product_mask]
     print("     Removed {} invalid sequences".format(pre_len - len(valid_sequences)))
     print("     Kept {} valid sequences".format(len(valid_sequences)))
     return valid_sequences
@@ -253,7 +270,7 @@ def generate_train_test_pairs(array, input_length=WINDOW_LEN, step_size=1):
     shape = (array.size - input_length + 2, input_length + 1)
     strides = array.strides * 2
     window = np.lib.stride_tricks.as_strided(array, strides=strides, shape=shape)[0::step_size]
-    return window.copy()
+    return window
 
 
 # TODO # TODO # TODO # TODO # TODO  # TODO
@@ -277,7 +294,7 @@ def filter_repeated_unique_sequences(array, min_items=1):
     repeated_uniques_mask = (
         unique_count_per_row == min_items + 1
     )  # +1 since padding is included as 'unique' item
-    valid_sequences = array[~repeated_uniques_mask].copy()
+    valid_sequences = array[~repeated_uniques_mask]
     print(
         "     Removed {} sequences containing a single repeated unique item".format(
             pre_len - len(valid_sequences)
@@ -297,7 +314,7 @@ else:
     test_index = int(len(sequence_df) / DAYS_IN_DATA * 3)  # roughly 2 days worth of sequences
     val_index = int(test_index * 1.5)
     print("     Using ~2 days ({} sequences) for validation".format(test_index))
-    print("     Using ~3 days ({} sequences) for testing".format(test_index))
+    print("     Using ~3 days ({} sequences) for testing".format(val_index))
 
 print("     Tokenizing, padding, filtering & splitting sequences")
 # define product_to_pt_tokenizer to encode sequences and include N most popular items (occurence)
@@ -334,9 +351,9 @@ gc.collect()
 # split into train/test subsets before reshaping sequence for training/validation
 # (since we subsample longer sequences of a single customer into multiple train/validation pairs,
 # while we do not wish to predict on multiple sequences of a single customer
-padded_sequences_train = padded_sequences[:-test_index].copy()
-padded_sequences_val = padded_sequences[-val_index:-test_index].copy()
-padded_sequences_test = padded_sequences[-test_index:].copy()
+padded_sequences_train = padded_sequences[:-test_index]
+padded_sequences_val = padded_sequences[-val_index:-test_index]
+padded_sequences_test = padded_sequences[-test_index:]
 
 del padded_sequences
 gc.collect()
@@ -344,6 +361,10 @@ gc.collect()
 padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
 padded_sequences_val = filter_valid_sequences(padded_sequences_val, min_items=MIN_ITEMS_TEST)
 padded_sequences_test = filter_valid_sequences(padded_sequences_test, min_items=MIN_ITEMS_TEST)
+
+# filters sequences that only contain a repeated unique product such as [1, 1, 1]
+if FILTER_REPEATED_UNIQUES:
+    padded_sequences_train = filter_repeated_unique_sequences(padded_sequences_train)
 
 # determine most popular items, to be used in evaluation as baseline
 unique, counts = np.unique(padded_sequences_train, return_counts=True)
@@ -371,20 +392,14 @@ padded_sequences_train = np.apply_along_axis(
 padded_sequences_val = np.apply_along_axis(
     func1d=generate_train_test_pairs, axis=1, arr=padded_sequences_val
 )
-padded_sequences_train = np.vstack(padded_sequences_train).copy()  # stack sequences
-padded_sequences_val = np.vstack(padded_sequences_val).copy()  # stack sequences
+padded_sequences_train = np.vstack(padded_sequences_train)  # stack sequences
+padded_sequences_val = np.vstack(padded_sequences_val)  # stack sequences
 print("     Generated {} subsequences for training".format(len(padded_sequences_train)))
 print("     Generated {} subsequences for validation".format(len(padded_sequences_val)))
-
 
 # filters valid sequences, note that due to reshaping invalid sequences can be re-introduced
 padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
 padded_sequences_val = filter_valid_sequences(padded_sequences_val, min_items=MIN_ITEMS_TEST)
-
-
-# filters sequences that only contain a repeated unique product such as [1, 1, 1]
-if FILTER_REPEATED_UNIQUES:
-    padded_sequences_train = filter_repeated_unique_sequences(padded_sequences_train)
 
 
 print_memory_footprint(padded_sequences_train)
@@ -431,7 +446,7 @@ if LOGGING and not DRY_RUN:
 t_train = time.time()  # start timer for training
 
 print("\n🧠 Defining network")
-tf.keras.backend.clear_session()  # clear potentially remaining network graphs in the memory
+# tf.keras.backend.clear_session()  # clear potentially remaining network graphs in the memory
 gc.collect()
 
 
@@ -743,7 +758,7 @@ plt.ylabel("Accuracy")
 plt.title("Accuracy (k=1) over Epochs".format(model.loss).upper(), size=13, weight="bold")
 plt.legend()
 plt.tight_layout()
-plt.savefig("./plots/validation_plots.png")
+plt.savefig("/home/marnix.koops/gru-item-ranker/plots/validation_plots.png")
 
 ####################################################################################################
 # 🚀 LOG EXPERIMENT
@@ -787,17 +802,21 @@ if LOGGING and not DRY_RUN:
     mlflow.log_metric("novelty", novelty)
     mlflow.log_metric("Train mins", np.round(train_time / 60), 2)
     mlflow.log_metric("Pred secs", np.round(pred_time))
-    mlflow.log_metric("Train loss", train_loss_values)
-    mlflow.log_metric("Train acc", train_acc_values)
-    mlflow.log_metric("Val loss", val_loss_values)
+    mlflow.log_metric("Train loss", np.round(train_loss_values[-1], 4))
+    mlflow.log_metric("Train acc", np.round(train_acc_values[-1], 4))
+    mlflow.log_metric("Val loss", np.round(val_loss_values[-1], 4))
 
     # Log artifacts
-    mlflow.log_artifact("./gru_pt_keras_local.py")  # log executed code
-    mlflow.log_artifact("./plots/validation_plots.png")  # log validation plots
+    mlflow.log_artifact(
+        "/home/marnix.koops/gru-item-ranker/gru_pt_keras_local.py"
+    )  # log executed code
+    mlflow.log_artifact(
+        "/home/marnix.koops/gru-item-ranker/plots/validation_plots.png"
+    )  # log validation plots
     file = ".model_config.txt"  # log detailed model settings
     with open(file, "w") as model_config:
         model_config.write("{}".format(model.get_config()))
-    mlflow.log_artifact("./model_config.txt")
+    mlflow.log_artifact("/home/marnix.koops/gru-item-ranker/model_config.txt")
 
     mlflow.end_run()
 
@@ -857,41 +876,3 @@ def sample_random_ranking_cases(cases=1):
 
 
 sample_random_ranking_cases(cases=2)
-
-####################################################################################################
-
-# import altair
-#
-#
-# counts = np.bincount(y_test.flatten())
-# non_zeros = np.nonzero(counts)[0]
-# token_counts = list(zip(non_zeros, counts[non_zeros]))
-# token_counts_df = pd.DataFrame(token_counts[0:50])
-# token_counts_df.columns = ["token", "actual_count"]
-#
-# bars = (
-#     altair.Chart(token_counts_df, title="Item Frequency Counts")
-#     .mark_bar()
-#     .encode(x="count:Q", y="token:O")
-# )
-# text = bars.mark_text(align="left", baseline="middle", dx=3).encode(text="count:Q")
-# (bars + text).properties(height=900).configure(background="#DDEEFF")
-#
-# counts = np.bincount(predicted_sequences[:, 1].flatten())
-# non_zeros = np.nonzero(counts)[0]
-# token_counts = list(zip(non_zeros, counts[non_zeros]))
-# token_counts_df_pred = pd.DataFrame(token_counts[0:50])
-# token_counts_df_pred.columns = ["token", "pred_count"]
-#
-# token_counts_df = token_counts_df.merge(token_counts_df_pred)
-# token_counts_df = pd.melt(
-#     token_counts_df, id_vars="token", value_vars=["actual_count", "pred_count"]
-# )
-#
-# bars = (
-#     altair.Chart(token_counts_df, title="Item Frequency Counts")
-#     .mark_bar()
-#     .encode(x="value:Q", y="token:O", color="variable")
-# )
-# text = bars.mark_text(align="left", baseline="middle", dx=3).encode(text="value:Q")
-# (bars + text).properties(height=900, width=400).configure(background="#DDEEFF")
