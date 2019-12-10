@@ -76,7 +76,7 @@ TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the 
 
 # model constants
 EMBED_DIM = 32  # number of dimensions for the embeddings
-N_HIDDEN_UNITS = 48  # number of units in the GRU layers
+N_HIDDEN_UNITS = 64  # number of units in the GRU layers
 MAX_EPOCHS = 12  # maximum number of epochs to train for
 BATCH_SIZE = 512  # batch size for training
 DROPOUT = 0.15  # node dropout
