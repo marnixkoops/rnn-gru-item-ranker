@@ -75,7 +75,7 @@ PRED_LOOKBACK = 6  # number of most recent products used per sequence in the tes
 TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the probabilities
 
 # model constants
-EMBED_DIM = 32  # number of dimensions for the embeddings
+EMBED_DIM = 48  # number of dimensions for the embeddings
 N_HIDDEN_UNITS = 64  # number of units in the GRU layers
 MAX_EPOCHS = 12  # maximum number of epochs to train for
 BATCH_SIZE = 512  # batch size for training
@@ -86,7 +86,7 @@ OPTIMIZER = tf.keras.optimizers.Nadam(
     learning_rate=LEARNING_RATE
 )  # note, tested a couple (RMSProp, Adam, Nadam), Adam and Nadam both seem fast with good results
 
-# Automatic FP16 mixed-precision training instead of FP32 for gradients and model weights
+# FP16 mixed-precision training instead of FP32 for gradients and model weights
 # See: https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html#tensorflow-amp
 # Needs more investigation in terms of speed, gives a warning for memory heavy tensor conversion
 # OPTIMIZER = tf.train.experimental.enable_mixed_precision_graph_rewrite(OPTIMIZER)
@@ -131,15 +131,15 @@ print("     Using DRY_RUN: {} and {} weeks of data".format(DRY_RUN, WEEKS_OF_DAT
 print("     Reading raw input sequence data from disk")
 
 # input data
-product_map_df = pd.read_csv("/home/marnix.koops/gru-item-ranker/data/product_mapping.csv")
-DATA_PATH1 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191013.csv"
-DATA_PATH2 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191020.csv"
-DATA_PATH3 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191027.csv"
-DATA_PATH4 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191103.csv"
-DATA_PATH5 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191110.csv"
-DATA_PATH6 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191117.csv"
-DATA_PATH7 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191124.csv"
-DATA_PATH8 = "/home/marnix.koops/gru-item-ranker/data/ga_product_sequence_20191201.csv"
+product_map_df = pd.read_csv("./data/product_mapping.csv")
+DATA_PATH1 = "./data/ga_product_sequence_20191013.csv"
+DATA_PATH2 = "./data/ga_product_sequence_20191020.csv"
+DATA_PATH3 = "./data/ga_product_sequence_20191027.csv"
+DATA_PATH4 = "./data/ga_product_sequence_20191103.csv"
+DATA_PATH5 = "./data/ga_product_sequence_20191110.csv"
+DATA_PATH6 = "./data/ga_product_sequence_20191117.csv"
+DATA_PATH7 = "./data/ga_product_sequence_20191124.csv"
+DATA_PATH8 = "./data/ga_product_sequence_20191201.csv"
 
 if DRY_RUN:
     sequence_df = pd.read_csv(DATA_PATH4)
@@ -341,9 +341,7 @@ print("     Unique items present in the data: {}".format(N_TOP_ITEMS))
 
 # pre-pad sequences with 0's, length is based on longest present sequence
 # this is required to transform the variable length sequences into equal train/test pairs
-padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(
-    sequences, padding="pre", dtype=np.int16
-)
+padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, padding="pre")
 print_memory_footprint(padded_sequences)
 del sequences
 gc.collect()
@@ -758,7 +756,7 @@ plt.ylabel("Accuracy")
 plt.title("Accuracy (k=1) over Epochs".format(model.loss).upper(), size=13, weight="bold")
 plt.legend()
 plt.tight_layout()
-plt.savefig("/home/marnix.koops/gru-item-ranker/plots/validation_plots.png")
+plt.savefig("./plots/validation_plots.png")
 
 ####################################################################################################
 # 🚀 LOG EXPERIMENT
@@ -807,16 +805,12 @@ if LOGGING and not DRY_RUN:
     mlflow.log_metric("Val loss", np.round(val_loss_values[-1], 4))
 
     # Log artifacts
-    mlflow.log_artifact(
-        "/home/marnix.koops/gru-item-ranker/gru_pt_keras_local.py"
-    )  # log executed code
-    mlflow.log_artifact(
-        "/home/marnix.koops/gru-item-ranker/plots/validation_plots.png"
-    )  # log validation plots
+    mlflow.log_artifact("./gru_pt_keras_local.py")  # log executed code
+    mlflow.log_artifact("./plots/validation_plots.png")  # log validation plots
     file = ".model_config.txt"  # log detailed model settings
     with open(file, "w") as model_config:
         model_config.write("{}".format(model.get_config()))
-    mlflow.log_artifact("/home/marnix.koops/gru-item-ranker/model_config.txt")
+    mlflow.log_artifact("./model_config.txt")
 
     mlflow.end_run()
 
