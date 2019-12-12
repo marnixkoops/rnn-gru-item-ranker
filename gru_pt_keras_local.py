@@ -666,13 +666,14 @@ print("\n     Performance metrics on test set:")
 y_pred = np.vstack(predicted_sequences[:, 0])  # top 1 recommendation (predicted next click)
 gc.collect()
 
+
 # TODO this ml_metric and vstack stuff can be implemented faster
 accuracy = np.round(accuracy_score(y_test, y_pred), 4)
 y_test = np.vstack(y_test)
-map2 = np.round(average_precision.mapk(y_test, predicted_sequences, k=2), 4)
-map4 = np.round(average_precision.mapk(y_test, predicted_sequences, k=4), 4)
-map6 = np.round(average_precision.mapk(y_test, predicted_sequences, k=6), 4)
-map12 = np.round(average_precision.mapk(y_test, predicted_sequences, k=12), 4)
+map2 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :2], k=2), 4)
+map4 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :4], k=4), 4)
+map6 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :6], k=6), 4)
+map12 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :12], k=12), 4)
 coverage = np.round(len(np.unique(predicted_sequences[:, :4])) / len(np.unique(X_train)), 4)
 novelty = np.round(compute_average_novelty(X_test[:, -4:], predicted_sequences[:, :4]), 4)
 
@@ -690,10 +691,10 @@ print("    Most Popular Items:")
 
 pop_products = np.repeat([pop_products], axis=0, repeats=len(y_test))
 accuracy_pop = np.round(accuracy_score(y_test, pop_products[:, -1:]), 4)
-map2_pop = np.round(average_precision.mapk(y_test, pop_products, k=2), 4)
-map4_pop = np.round(average_precision.mapk(y_test, pop_products, k=4), 4)
-map6_pop = np.round(average_precision.mapk(y_test, pop_products, k=6), 4)
-map12_pop = np.round(average_precision.mapk(y_test, pop_products, k=12), 4)
+map2_pop = np.round(average_precision.mapk(y_test, pop_products[:, :2], k=2), 4)
+map4_pop = np.round(average_precision.mapk(y_test, pop_products[:, :4], k=4), 4)
+map6_pop = np.round(average_precision.mapk(y_test, pop_products[:, :6], k=6), 4)
+map12_pop = np.round(average_precision.mapk(y_test, pop_products[:, :12], k=12), 4)
 coverage_pop = np.round(len(np.unique(pop_products[:, :4])) / len(np.unique(X_train)), 4)
 novelty_pop = np.round(compute_average_novelty(X_test[:, -4:], pop_products[:, :4]), 4)
 
@@ -870,3 +871,6 @@ def sample_random_ranking_cases(cases=1):
 
 
 sample_random_ranking_cases(cases=2)
+
+
+# find strongest relations
