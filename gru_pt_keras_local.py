@@ -1,17 +1,18 @@
-import numpy as np
-import pandas as pd
 import time
 import datetime
 import warnings
 import gc
+import mlflow
 
+import numpy as np
+import pandas as pd
 import tensorflow as tf
+
 from tensorflow import keras
 from tensorflow.python.client import device_lib
 from tensorflow.compat.v1 import ConfigProto
 from tensorflow.compat.v1 import InteractiveSession
 
-import mlflow
 from ml_metrics import average_precision
 from sklearn.metrics import accuracy_score
 from sklearn.utils import shuffle
@@ -71,7 +72,7 @@ N_TOP_ITEMS = None  # None will yield all items available in the data, there are
 MIN_ITEMS_TRAIN = 2  # sequences with less products (excluding target) are invalid and removed
 MIN_ITEMS_TEST = 1  # sequences with less products (excluding target) are invalid and removed
 WINDOW_LEN = 4  # fixed moving window size for generating input-sequence/target rows for training
-PRED_LOOKBACK = 6  # number of most recent products used per sequence in the test set to predict on
+PRED_LOOKBACK = 24  # number of most recent products used per sequence in the test set to predict on
 TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the probabilities
 
 # model constants
@@ -808,7 +809,7 @@ if LOGGING and not DRY_RUN:
     # Log artifacts
     mlflow.log_artifact("./gru_pt_keras_local.py")  # log executed code
     mlflow.log_artifact("./plots/validation_plots.png")  # log validation plots
-    file = ".model_config.txt"  # log detailed model settings
+    file = "model_config.txt"  # log detailed model settings
     with open(file, "w") as model_config:
         model_config.write("{}".format(model.get_config()))
     mlflow.log_artifact("./model_config.txt")
@@ -873,4 +874,22 @@ def sample_random_ranking_cases(cases=1):
 sample_random_ranking_cases(cases=2)
 
 
-# find strongest relations
+####################################################################################################
+
+# import itertools
+# import collections
+#
+#
+# t0 = time.time()
+#
+# combinations = [
+#     list(itertools.product(X_test[row][np.nonzero(X_test[row])], predicted_sequences[row]))
+#     for row in X_test
+# ]
+#
+# combinations = np.vstack(combinations)
+# combinations_counter_dict = dict(collections.Counter(map(tuple, combinations)))
+#
+# {k: v for k, v in sorted(combinations_counter_dict.items(), key=lambda item: item[1], reverse=True)}
+#
+# print("{}".format(time.time() - t0))

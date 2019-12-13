@@ -1,15 +1,18 @@
-import numpy as np
-import pandas as pd
 import time
 import datetime
 import warnings
 import gc
+import mlflow
 
+import numpy as np
+import pandas as pd
 import tensorflow as tf
+
 from tensorflow import keras
 from tensorflow.python.client import device_lib
+from tensorflow.compat.v1 import ConfigProto
+from tensorflow.compat.v1 import InteractiveSession
 
-import mlflow
 from ml_metrics import average_precision
 from sklearn.metrics import accuracy_score
 from sklearn.utils import shuffle
@@ -26,61 +29,73 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 ####################################################################################################
 
 # run settings
-DRY_RUN = True  # runs flow on small subset of data for speed and disables mlfow tracking
-LOGGING = False  # mlflow experiment logging
-WEEKS_OF_DATA = 1  # use 1, 2, 3 or 4 weeks worth of data
+DRY_RUN = False  # runs flow on small subset of data for speed and disables mlfow tracking
+LOGGING = True  # mlflow experiment logging
+WEEKS_OF_DATA = 6  # how many weeks of data to use [1, 8]
 
 # define where we run and on which device (GPU/CPU)
+# force memory growth options to avoid memory allocation issues on the GPU
 # GPU_AVAILABLE = tf.test.is_gpu_available(cuda_only=False, min_cuda_compute_capability=None)
 all_devices = str(device_lib.list_local_devices())
 gpu_devices = tf.config.experimental.list_physical_devices("GPU")
 if "Tesla P100" in all_devices:
     DEVICE = "Tesla P100 GPU"
     MACHINE = "cloud"
-    # tf.config.experimental.set_memory_growth(gpu_devices[0], True)  # no allocating memory upfront
+    tf.config.experimental.set_memory_growth(gpu_devices[0], True)  # no allocating memory upfront
+    tf.config.experimental.set_virtual_device_configuration(
+        gpu_devices[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]
+    )
+    config = ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.8
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
 elif "GPU" in all_devices:
     DEVICE = "GPU"
     MACHINE = "cloud"
-    # tf.config.experimental.set_memory_growth(gpu_devices[0], True)
+    tf.config.experimental.set_memory_growth(gpu_devices[0], True)
+    tf.config.experimental.set_virtual_device_configuration(
+        gpu_devices[0], [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=1024 * 8)]
+    )
+    config = ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = 0.8
+    config.gpu_options.allow_growth = True
+    session = InteractiveSession(config=config)
 elif "CPU" in all_devices:
     DEVICE = "CPU"
     MACHINE = "local"
 
+
 print("🧠 Running TensorFlow version {} on {}".format(tf.__version__, DEVICE))
 
 # data constants
-N_TOP_ITEMS = None  # we have ~1600 product_types currently
-MIN_ITEMS_TRAIN = 1  # sequences with less products (excluding target) are invalid and removed
+N_TOP_ITEMS = None  # None will yield all items available in the data, there are ~1650 PTs
+MIN_ITEMS_TRAIN = 2  # sequences with less products (excluding target) are invalid and removed
 MIN_ITEMS_TEST = 1  # sequences with less products (excluding target) are invalid and removed
-WINDOW_LEN = 6  # fixed moving window size for generating input-sequence/target rows for training
-PRED_LOOKBACK = 6  # number of most recent products used per sequence in the test set to predict on
+WINDOW_LEN = 4  # fixed moving window size for generating input-sequence/target rows for training
+PRED_LOOKBACK = 24  # number of most recent products used per sequence in the test set to predict on
 TOP_K_OUTPUT_LEN = 12  # number of top K item probabilities to extract from the probabilities
 
 # model constants
-EMBED_DIM = 24  # number of dimensions for the embeddings
-N_HIDDEN_UNITS = 48  # number of units in the GRU layers
+EMBED_DIM = 48  # number of dimensions for the embeddings
+N_HIDDEN_UNITS = 64  # number of units in the GRU layers
 MAX_EPOCHS = 12  # maximum number of epochs to train for
 BATCH_SIZE = 512  # batch size for training
-DROPOUT = 0.2  # node dropout
-RECURRENT_DROPOUT = 0.2  # recurrent state dropout during training, fast CuDNN GPU requires 0!
-LEARNING_RATE = 0.004
+DROPOUT = 0.15  # node dropout
+RECURRENT_DROPOUT = 0.15  # recurrent state dropout during training, fast CuDNN GPU requires 0!
+LEARNING_RATE = 0.002
 OPTIMIZER = tf.keras.optimizers.Nadam(
     learning_rate=LEARNING_RATE
 )  # note, tested a couple (RMSProp, Adam, Nadam), Adam and Nadam both seem fast with good results
 
-# Automatic FP16 mixed-precision training instead of FP32 for gradients and model weights
+# FP16 mixed-precision training instead of FP32 for gradients and model weights
 # See: https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html#tensorflow-amp
 # Needs more investigation in terms of speed, gives a warning for memory heavy tensor conversion
 # OPTIMIZER = tf.train.experimental.enable_mixed_precision_graph_rewrite(OPTIMIZER)
 
 # training constants
-TRAIN_RATIO = 0.8
-VAL_RATIO = 0.1  # note, creates a gap in time between train/test, no val improves performance
-TEST_RATIO = 0.1  # note, this % results in more samples when more weeks of data are used
 SHUFFLE_TRAIN_SET = True  # shuffles the training sequences (row-wise), seems smart for training
-SHUFFLE_TRAIN_AND_VAL_SET = False  # shuffles both the training and validation sequences
 DATA_IMBALANCE_CORRECTION = False  # Supply product weights during model training to avoid bias
-FILTER_REPEATED_UNIQUES = False  # Filters sequences with only 1 unique item e.g. [1, 1, 1, 1, 1]
+FILTER_REPEATED_UNIQUES = True  # Filters sequences with only 1 unique item e.g. [1, 1, 1, 1, 1]
 
 # dry run constants for development and debugging
 if DRY_RUN:
@@ -91,6 +106,121 @@ if DRY_RUN:
     BATCH_SIZE = 32
     MAX_EPOCHS = 5
     LEARNING_RATE = 0.01
+
+
+# GOOD ONES FOR PT SO FAR
+# MIN_ITEMS_TRAIN = 2
+# MIN_ITEMS_TEST = 1
+# WINDOW_LEN = 4
+# PRED_LOOKBACK = 6
+# TOP_K_OUTPUT_LEN = 12
+# EMBED_DIM = 32
+# N_HIDDEN_UNITS = 48
+# MAX_EPOCHS = 12
+# BATCH_SIZE = 512
+# DROPOUT = 0.15
+# RECURRENT_DROPOUT = 0.15
+# LEARNING_RATE = 0.002
+
+
+####################################################################################################
+# 🚀 LOCAL INPUT DATA
+####################################################################################################
+
+print("\n🚀 Starting experiment on {}".format(datetime.datetime.now() + datetime.timedelta(hours=1)))
+print("     Using DRY_RUN: {} and {} weeks of data".format(DRY_RUN, WEEKS_OF_DATA))
+print("     Reading raw input sequence data from disk")
+
+# input data
+product_map_df = pd.read_csv("./data/product_mapping.csv")
+DATA_PATH1 = "./data/ga_product_sequence_20191013.csv"
+DATA_PATH2 = "./data/ga_product_sequence_20191020.csv"
+DATA_PATH3 = "./data/ga_product_sequence_20191027.csv"
+DATA_PATH4 = "./data/ga_product_sequence_20191103.csv"
+DATA_PATH5 = "./data/ga_product_sequence_20191110.csv"
+DATA_PATH6 = "./data/ga_product_sequence_20191117.csv"
+DATA_PATH7 = "./data/ga_product_sequence_20191124.csv"
+DATA_PATH8 = "./data/ga_product_sequence_20191201.csv"
+
+if DRY_RUN:
+    sequence_df = pd.read_csv(DATA_PATH4)
+    sequence_df = sequence_df.tail(SEQUENCES).copy()  # take a small subset of data for debugging
+elif WEEKS_OF_DATA == 2:
+    sequence_df3 = pd.read_csv(DATA_PATH3)
+    sequence_df4 = pd.read_csv(DATA_PATH4)
+    sequence_df = sequence_df3.append(sequence_df4)
+    del sequence_df3, sequence_df4
+elif WEEKS_OF_DATA == 3:
+    sequence_df2 = pd.read_csv(DATA_PATH6)
+    sequence_df3 = pd.read_csv(DATA_PATH7)
+    sequence_df4 = pd.read_csv(DATA_PATH8)
+    sequence_df = sequence_df2.append(sequence_df3).append(sequence_df4)
+    del sequence_df2, sequence_df3, sequence_df4
+elif WEEKS_OF_DATA == 4:
+    sequence_df = pd.read_csv(DATA_PATH4)
+    sequence_df2 = pd.read_csv(DATA_PATH5)
+    sequence_df3 = pd.read_csv(DATA_PATH6)
+    sequence_df4 = pd.read_csv(DATA_PATH7)
+    sequence_df = sequence_df.append(sequence_df2).append(sequence_df3).append(sequence_df4)
+    del sequence_df2, sequence_df3, sequence_df4
+elif WEEKS_OF_DATA == 6:
+    sequence_df = pd.read_csv(DATA_PATH1)
+    sequence_df2 = pd.read_csv(DATA_PATH2)
+    sequence_df3 = pd.read_csv(DATA_PATH3)
+    sequence_df4 = pd.read_csv(DATA_PATH4)
+    sequence_df5 = pd.read_csv(DATA_PATH5)
+    sequence_df6 = pd.read_csv(DATA_PATH6)
+    sequence_df = (
+        sequence_df.append(sequence_df2)
+        .append(sequence_df3)
+        .append(sequence_df4)
+        .append(sequence_df5)
+        .append(sequence_df6)
+    )
+    del (
+        sequence_df2,
+        sequence_df3,
+        sequence_df4,
+        sequence_df5,
+        sequence_df6,
+    )
+elif WEEKS_OF_DATA == 8:
+    sequence_df = pd.read_csv(DATA_PATH1)
+    sequence_df2 = pd.read_csv(DATA_PATH2)
+    sequence_df3 = pd.read_csv(DATA_PATH3)
+    sequence_df4 = pd.read_csv(DATA_PATH4)
+    sequence_df5 = pd.read_csv(DATA_PATH5)
+    sequence_df6 = pd.read_csv(DATA_PATH6)
+    sequence_df7 = pd.read_csv(DATA_PATH7)
+    sequence_df8 = pd.read_csv(DATA_PATH8)
+    sequence_df = (
+        sequence_df.append(sequence_df2)
+        .append(sequence_df3)
+        .append(sequence_df4)
+        .append(sequence_df5)
+        .append(sequence_df6)
+        .append(sequence_df7)
+        .append(sequence_df8)
+    )
+    del (
+        sequence_df2,
+        sequence_df3,
+        sequence_df4,
+        sequence_df5,
+        sequence_df6,
+        sequence_df7,
+        sequence_df8,
+    )
+else:
+    sequence_df = pd.read_csv(DATA_PATH4)
+
+sequence_df_len = len(sequence_df)
+sequence_df = sequence_df.drop_duplicates(keep="first")  # also checks for visit_date + id
+sequence_df = sequence_df.reset_index(drop=True)
+min_date, max_date = sequence_df["visit_date"].min(), sequence_df["visit_date"].max()
+
+print("     Dropped {} duplicate rows".format(sequence_df_len - len(sequence_df)))
+print("     Data contains {} sequences from {} to {}".format(len(sequence_df), min_date, max_date))
 
 ####################################################################################################
 # 🚀 GOOGLE CLOUD INPUT DATA
@@ -158,9 +288,17 @@ MIN_DATE, MAX_DATE = sequence_df["visit_date"].min(), sequence_df["visit_date"].
 print("     Dropped {} duplicate rows".format(sequence_df_len - len(sequence_df)))
 print("     Data contains {} sequences from {} to {}".format(len(sequence_df), MIN_DATE, MAX_DATE))
 
+
 ####################################################################################################
 # 🚀 PREPARE DATA FOR MODELING
 ####################################################################################################
+
+t_prep = time.time()  # start timer for preparing data
+
+
+def print_memory_footprint(array):
+    """Prints a statement with the memory size of the input array"""
+    print("     Memory footprint of training array: {:.4} GigaBytes".format(array.nbytes * 1e-9))
 
 
 def filter_valid_sequences(array, min_items=MIN_ITEMS_TRAIN):
@@ -176,7 +314,7 @@ def filter_valid_sequences(array, min_items=MIN_ITEMS_TRAIN):
     pre_len = len(array)
     array = array[array[:, -1] != 0]  # ending in 0 is a duplicate subsequence or empty sequence
     min_product_mask = np.sum((array != 0), axis=1) >= min_items  # create mask for min products
-    valid_sequences = array[min_product_mask].copy()
+    valid_sequences = array[min_product_mask]
     print("     Removed {} invalid sequences".format(pre_len - len(valid_sequences)))
     print("     Kept {} valid sequences".format(len(valid_sequences)))
     return valid_sequences
@@ -199,23 +337,31 @@ def generate_train_test_pairs(array, input_length=WINDOW_LEN, step_size=1):
     shape = (array.size - input_length + 2, input_length + 1)
     strides = array.strides * 2
     window = np.lib.stride_tricks.as_strided(array, strides=strides, shape=shape)[0::step_size]
-    return window.copy()
+    return window
+
+
+# TODO # TODO # TODO # TODO # TODO  # TODO
+# TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO
+# TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO
+# TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO # TODO
+# dropout repeated samples with a probability!
 
 
 def filter_repeated_unique_sequences(array, min_items=1):
-    """Remove (sub)sequences that only contain a repeated unique product (no info/noise?).
-    Note that padding=0 is included as item but is actually not a unique view, hence the > min_items + 1.
+    """Short summary.
     Args:
         array (type): Description of parameter `array`.
+        min_items (type): Description of parameter `min_items`.
+        sampling_prob (type): Description of parameter `sampling_prob`.
     Returns:
-        (type): Description of returned object.
+        type: Description of returned object.
     """
     pre_len = len(array)
     unique_count_per_row = np.apply_along_axis(func1d=lambda x: len(set(x)), arr=array, axis=1)
     repeated_uniques_mask = (
-        unique_count_per_row > min_items + 1
+        unique_count_per_row == min_items + 1
     )  # +1 since padding is included as 'unique' item
-    valid_sequences = array[repeated_uniques_mask].copy()
+    valid_sequences = array[~repeated_uniques_mask]
     print(
         "     Removed {} sequences containing a single repeated unique item".format(
             pre_len - len(valid_sequences)
@@ -225,13 +371,22 @@ def filter_repeated_unique_sequences(array, min_items=1):
     return valid_sequences
 
 
-t_prep = time.time()  # start timer for preparing data
-
 print("\n💾 Processing data")
+
+# determine indices of validation and test sets
+if DRY_RUN:
+    test_index = int(0.15 * len(sequence_df))  # use 15% for testing if dry run
+else:
+    DAYS_IN_DATA = WEEKS_OF_DATA * 7
+    test_index = int(len(sequence_df) / DAYS_IN_DATA * 3)  # roughly 2 days worth of sequences
+    val_index = int(test_index * 1.5)
+    print("     Using ~2 days ({} sequences) for validation".format(test_index))
+    print("     Using ~3 days ({} sequences) for testing".format(val_index))
+
 print("     Tokenizing, padding, filtering & splitting sequences")
 # define product_to_pt_tokenizer to encode sequences and include N most popular items (occurence)
 product_to_pt_map_dict = dict(
-    zip(product_df["product_id"].astype(str), product_df["product_type_id"].astype(str))
+    zip(product_map_df["product_id"].astype(str), product_map_df["product_type_id"].astype(str))
 )
 product_to_pt_tokenizer = keras.preprocessing.text.Tokenizer()
 product_to_pt_tokenizer.word_index = product_to_pt_map_dict
@@ -245,6 +400,12 @@ tokenizer = keras.preprocessing.text.Tokenizer()
 tokenizer.fit_on_texts(sequences)
 sequences = tokenizer.texts_to_sequences(sequences)
 
+# how many items are in the data? (used for the input layer)
+n_included_pt = len(tokenizer.word_index.values())
+N_TOP_ITEMS = n_included_pt + 1
+
+print("     Unique items present in the data: {}".format(N_TOP_ITEMS))
+
 # pre-pad sequences with 0's, length is based on longest present sequence
 # this is required to transform the variable length sequences into equal train/test pairs
 padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, padding="pre")
@@ -255,25 +416,26 @@ gc.collect()
 # split into train/test subsets before reshaping sequence for training/validation
 # (since we subsample longer sequences of a single customer into multiple train/validation pairs,
 # while we do not wish to predict on multiple sequences of a single customer
-test_index = int(TEST_RATIO * len(padded_sequences))
-padded_sequences_train = padded_sequences[:-test_index].copy()
-padded_sequences_test = padded_sequences[-test_index:].copy()
+padded_sequences_train = padded_sequences[:-test_index]
+padded_sequences_val = padded_sequences[-val_index:-test_index]
+padded_sequences_test = padded_sequences[-test_index:]
+
+del padded_sequences
+gc.collect()
 
 padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
+padded_sequences_val = filter_valid_sequences(padded_sequences_val, min_items=MIN_ITEMS_TEST)
 padded_sequences_test = filter_valid_sequences(padded_sequences_test, min_items=MIN_ITEMS_TEST)
+
+# filters sequences that only contain a repeated unique product such as [1, 1, 1]
+if FILTER_REPEATED_UNIQUES:
+    padded_sequences_train = filter_repeated_unique_sequences(padded_sequences_train)
 
 # determine most popular items, to be used in evaluation as baseline
 unique, counts = np.unique(padded_sequences_train, return_counts=True)
 frequency_dict = dict(zip(unique, counts))
 pop_products = list(sorted(frequency_dict, key=frequency_dict.get, reverse=True))[1:11]
 
-# how many items there are for the input layer
-n_included_pt = len(tokenizer.word_index.values())
-N_TOP_ITEMS = n_included_pt + 1
-
-print("\n     Unique items present in the data: {}".format(N_TOP_ITEMS))
-print("     Training & evaluating model on {} sequences".format(len(padded_sequences_train)))
-print("     Testing recommendations on {} sequences".format(len(padded_sequences_test)))
 print_memory_footprint(padded_sequences_train)
 
 # generate a dictionary with unique value counts to be used as class_weight in model fit
@@ -286,40 +448,31 @@ if DATA_IMBALANCE_CORRECTION:
 else:
     product_count_dict = None
 
-# clean up memory
-del padded_sequences
-gc.collect()
-
 
 # generate sliding window of sequences with x=WINDOW_LEN input products and y=1 target product
 print("\n     Reshaping into train/test subsequences with fixed window size for training")
 padded_sequences_train = np.apply_along_axis(
     func1d=generate_train_test_pairs, axis=1, arr=padded_sequences_train
 )
-padded_sequences_train = np.vstack(padded_sequences_train).copy()  # stack sequences
-print("     Generated {} subsequences for training/validation".format(len(padded_sequences_train)))
+padded_sequences_val = np.apply_along_axis(
+    func1d=generate_train_test_pairs, axis=1, arr=padded_sequences_val
+)
+padded_sequences_train = np.vstack(padded_sequences_train)  # stack sequences
+padded_sequences_val = np.vstack(padded_sequences_val)  # stack sequences
+print("     Generated {} subsequences for training".format(len(padded_sequences_train)))
+print("     Generated {} subsequences for validation".format(len(padded_sequences_val)))
 
-# filter sequences, note that due to reshaping invalid sequences can be re-introduced
+# filters valid sequences, note that due to reshaping invalid sequences can be re-introduced
 padded_sequences_train = filter_valid_sequences(padded_sequences_train, min_items=MIN_ITEMS_TRAIN)
-
-# HOW TO DEAL WITH THESE?
-# TODO TODO TODO TODO TODO TODO TODO
-if FILTER_REPEATED_UNIQUES:
-    padded_sequences_train = filter_repeated_unique_sequences(padded_sequences_train)
+padded_sequences_val = filter_valid_sequences(padded_sequences_val, min_items=MIN_ITEMS_TEST)
 
 
 print_memory_footprint(padded_sequences_train)
 
-
-# shuffle training and validation sequences randomly (across rows, not within sequences ofcourse)
-if SHUFFLE_TRAIN_AND_VAL_SET:
-    padded_sequences_train = shuffle(padded_sequences_train)
-
 # split sequences into subsets for training/validation/testing
 # the last column of each row is the target product for each input subsequence
-val_index = int(VAL_RATIO * len(padded_sequences_train))
-X_train, y_train = padded_sequences_train[:-val_index, :-1], padded_sequences_train[:-val_index, -1]
-X_val, y_val = padded_sequences_train[:val_index, :-1], padded_sequences_train[:val_index, -1]
+X_train, y_train = padded_sequences_train[:, :-1], padded_sequences_train[:, -1]
+X_val, y_val = padded_sequences_val[:, :-1], padded_sequences_val[:, -1]
 X_test, y_test = padded_sequences_test[:, -(PRED_LOOKBACK + 1) : -1], padded_sequences_test[:, -1]
 
 # shuffle training sequences randomly (across rows, not within sequences ofcourse)
@@ -331,21 +484,21 @@ if SHUFFLE_TRAIN_SET:
 # X_test, y_test = padded_sequences_test[:, -5:-1], padded_sequences_test[:, -1]
 
 print("\n     Dropping some remainder rows to fit data into batches of {}".format(BATCH_SIZE))
-train_index = len(X_train) - len(X_train) % BATCH_SIZE
-val_index = len(X_val) - len(X_val) % BATCH_SIZE
-test_index = len(X_test) - len(X_test) % BATCH_SIZE
-X_train, y_train = X_train[:train_index, :], y_train[:train_index]
-X_val, y_val = X_val[:val_index:, :], y_val[:val_index]
-X_test, y_test = X_test[:test_index, :], y_test[:test_index]
+train_skip_rows = len(X_train) % BATCH_SIZE
+val_skip_rows = len(X_val) % BATCH_SIZE
+test_skip_rows = len(X_test) % BATCH_SIZE
+X_train, y_train = X_train[train_skip_rows:, :], y_train[train_skip_rows:]
+X_val, y_val = X_val[val_skip_rows:, :], y_val[val_skip_rows:]
+X_test, y_test = X_test[test_skip_rows:, :], y_test[test_skip_rows:]
 
-print("     Final dataset dimensions:")
+print("     Final (subsampled) dataset dimensions:")
 print("     Training X {}, y {}".format(X_train.shape, y_train.shape))
 print("     Validation X {}, y {}".format(X_val.shape, y_val.shape))
 print("     Testing X {}, y {}".format(X_test.shape, y_test.shape))
 
 print("⏱️ Elapsed time for processing input data: {:.4} seconds".format(time.time() - t_prep))
 
-del padded_sequences_train, padded_sequences_test
+del padded_sequences_train, padded_sequences_val, padded_sequences_test
 gc.collect()
 
 
@@ -358,11 +511,11 @@ if LOGGING and not DRY_RUN:
 t_train = time.time()  # start timer for training
 
 print("\n🧠 Defining network")
-tf.keras.backend.clear_session()  # clear potentially remaining network graphs in the memory
+# tf.keras.backend.clear_session()  # clear potentially remaining network graphs in the memory
 gc.collect()
 
 
-def embedding_GRU_model(
+def embedding_gru_network(
     vocab_size=N_TOP_ITEMS,
     embed_dim=EMBED_DIM,
     num_units=N_HIDDEN_UNITS,
@@ -403,6 +556,7 @@ def embedding_GRU_model(
                 stateful=True,
                 recurrent_initializer="glorot_uniform",
                 reset_after=True,  # True is required for CuDNN GPU support
+                implementation=2,
             ),
             tf.keras.layers.Dense(N_TOP_ITEMS, activation="sigmoid"),
         ]
@@ -411,7 +565,7 @@ def embedding_GRU_model(
     return model
 
 
-model = embedding_GRU_model(
+model = embedding_gru_network(
     vocab_size=N_TOP_ITEMS, embed_dim=EMBED_DIM, num_units=N_HIDDEN_UNITS, batch_size=BATCH_SIZE
 )
 
@@ -448,12 +602,12 @@ gc.collect()
 
 
 ####################################################################################################
-# 🚀 CREATE PREDICTIONS
+# 🚀 CREATE RANKINGS
 ####################################################################################################
 
-print("\n🧠 Evaluating predictions of network")
+print("\n🧠 Evaluating ranking of network")
 t_pred = time.time()  # start timer for predictions
-print("     Creating predictions on test set")
+print("     Creating ranking on test set")
 
 
 def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
@@ -462,10 +616,10 @@ def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
     Output positions are based on probability from high to low so the output sequence is ordered.
     To be used for obtaining multiple product ranked and calculating MAP@K values.
     Args:
-        y_pred_probs (array): Predicted probabilities for all included items.
-        output_length (int): Number of top K items to extract from the prediction array.
+        y_pred_probs (array): Predicted probabilities for all included products.
+        output_length (int): Number of top K products to extract from the prediction array.
     Returns:
-        array: Predictions matrix with shape [X_test, output_length]
+        array: Product ranking matrix with shape [X_test, output_length]
     """
     # obtain indices of highest logit values, the position corresponds to the encoded item
     ind_of_max_logits = np.argpartition(y_pred_probs, -output_length)[-output_length:]
@@ -475,12 +629,12 @@ def generate_predicted_sequences(y_pred_probs, output_length=TOP_K_OUTPUT_LEN):
     return ordered_predicted_sequences
 
 
-# model.predict occasionaly leads to memory leaking issues when input data is large.
+# model.predict occasionaly leads to memory leaking issues when input data is large (10K+ products).
 # issue is known and should be fixed soon: https://github.com/keras-team/keras/issues/13118 and
 # https://github.com/tensorflow/tensorflow/issues/33009
 # y_pred_probs = model.predict(X_test, batch_size=BATCH_SIZE)
 
-# predict in multiple batches to fit in GPU memory (array is 4 bytes * sequences * items = big)
+# predict in multiple batches to fit in GPU memory (array is 4 bytes * sequences * products = big)
 dividing_row = len(X_test) // 3
 remainder_due_to_batch_size = dividing_row % BATCH_SIZE  # needs to fit into BATCH_SIZE
 dividing_row = dividing_row - remainder_due_to_batch_size
@@ -579,13 +733,14 @@ print("\n     Performance metrics on test set:")
 y_pred = np.vstack(predicted_sequences[:, 0])  # top 1 recommendation (predicted next click)
 gc.collect()
 
+
 # TODO this ml_metric and vstack stuff can be implemented faster
 accuracy = np.round(accuracy_score(y_test, y_pred), 4)
 y_test = np.vstack(y_test)
-map2 = np.round(average_precision.mapk(y_test, predicted_sequences, k=2), 4)
-map4 = np.round(average_precision.mapk(y_test, predicted_sequences, k=4), 4)
-map6 = np.round(average_precision.mapk(y_test, predicted_sequences, k=6), 4)
-map12 = np.round(average_precision.mapk(y_test, predicted_sequences, k=12), 4)
+map2 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :2], k=2), 4)
+map4 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :4], k=4), 4)
+map6 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :6], k=6), 4)
+map12 = np.round(average_precision.mapk(y_test, predicted_sequences[:, :12], k=12), 4)
 coverage = np.round(len(np.unique(predicted_sequences[:, :4])) / len(np.unique(X_train)), 4)
 novelty = np.round(compute_average_novelty(X_test[:, -4:], predicted_sequences[:, :4]), 4)
 
@@ -603,10 +758,10 @@ print("    Most Popular Items:")
 
 pop_products = np.repeat([pop_products], axis=0, repeats=len(y_test))
 accuracy_pop = np.round(accuracy_score(y_test, pop_products[:, -1:]), 4)
-map2_pop = np.round(average_precision.mapk(y_test, pop_products, k=2), 4)
-map4_pop = np.round(average_precision.mapk(y_test, pop_products, k=4), 4)
-map6_pop = np.round(average_precision.mapk(y_test, pop_products, k=6), 4)
-map12_pop = np.round(average_precision.mapk(y_test, pop_products, k=12), 4)
+map2_pop = np.round(average_precision.mapk(y_test, pop_products[:, :2], k=2), 4)
+map4_pop = np.round(average_precision.mapk(y_test, pop_products[:, :4], k=4), 4)
+map6_pop = np.round(average_precision.mapk(y_test, pop_products[:, :6], k=6), 4)
+map12_pop = np.round(average_precision.mapk(y_test, pop_products[:, :12], k=12), 4)
 coverage_pop = np.round(len(np.unique(pop_products[:, :4])) / len(np.unique(X_train)), 4)
 novelty_pop = np.round(compute_average_novelty(X_test[:, -4:], pop_products[:, :4]), 4)
 
@@ -696,14 +851,12 @@ if LOGGING and not DRY_RUN:
     mlflow.log_param("min_items_train", MIN_ITEMS_TRAIN)
     mlflow.log_param("min_items_test", MIN_ITEMS_TEST)
     mlflow.log_param("shuffle_training", SHUFFLE_TRAIN_SET)
-    mlflow.log_param("shuffle_val", SHUFFLE_TRAIN_AND_VAL_SET)
     mlflow.log_param("epochs", epochs[-1])
-    mlflow.log_param("test_ratio", TEST_RATIO)
     mlflow.log_param("weeks_of_data", WEEKS_OF_DATA)
     mlflow.log_param("data_imbalance_correction", DATA_IMBALANCE_CORRECTION)
     mlflow.log_param("filter_repeated_uniques", FILTER_REPEATED_UNIQUES)
-    mlflow.log_param("min_date", MIN_DATE)
-    mlflow.log_param("max_date", MAX_DATE)
+    mlflow.log_param("min_date", min_date)
+    mlflow.log_param("max_date", max_date)
 
     # Log metrics
     mlflow.log_metric("Accuracy", accuracy)
@@ -715,11 +868,14 @@ if LOGGING and not DRY_RUN:
     mlflow.log_metric("novelty", novelty)
     mlflow.log_metric("Train mins", np.round(train_time / 60), 2)
     mlflow.log_metric("Pred secs", np.round(pred_time))
+    mlflow.log_metric("Train loss", np.round(train_loss_values[-1], 4))
+    mlflow.log_metric("Train acc", np.round(train_acc_values[-1], 4))
+    mlflow.log_metric("Val loss", np.round(val_loss_values[-1], 4))
 
     # Log artifacts
-    mlflow.log_artifact("./gru_pt_keras_cloud.py")  # log executed code
+    mlflow.log_artifact("./gru_pt_keras_local.py")  # log executed code
     mlflow.log_artifact("./plots/validation_plots.png")  # log validation plots
-    file = ".model_config.txt"  # log detailed model settings
+    file = "model_config.txt"  # log detailed model settings
     with open(file, "w") as model_config:
         model_config.write("{}".format(model.get_config()))
     mlflow.log_artifact("./model_config.txt")
@@ -728,3 +884,78 @@ if LOGGING and not DRY_RUN:
 
 print("✅ All done, total elapsed time: {:.3} minutes".format((time.time() - t_prep) / 60))
 gc.collect()
+
+
+####################################################################################################
+# 🚀 INVESTIGATE RANKINGS
+####################################################################################################
+
+# create dictionary to map tokens back to item_id
+token_item_map_dict = {token: int(item) for token, item in tokenizer.index_word.items()}
+
+# create dictionary to map item_id to item names
+item_name_map_df = product_map_df[["product_type_id", "product_type_name"]].drop_duplicates()
+item_name_map_df = dict(
+    zip(item_name_map_df["product_type_id"], item_name_map_df["product_type_name"])
+)
+
+# map back from token to item_id ints
+tokens = np.array(list(token_item_map_dict.keys()))
+item_ids = np.array(list(token_item_map_dict.values()))
+mapping_ar = np.zeros(tokens.max() + 1, dtype=item_ids.dtype)
+mapping_ar[tokens] = item_ids
+input_items = mapping_ar[X_test]  # map back predicted items
+actual_items = mapping_ar[y_test]  # map back actualitems
+predicted_items = mapping_ar[predicted_sequences]  # map back predicted items
+
+# create dictionary to map item_id to item names
+item_name_map_df = product_map_df[["product_type_id", "product_type_name"]].drop_duplicates()
+item_name_map_df = dict(
+    zip(item_name_map_df["product_type_id"], item_name_map_df["product_type_name"])
+)
+item_ids = np.array(list(item_name_map_df.keys()))
+names = np.array(list(item_name_map_df.values()))
+item_name_mapping_ar = np.zeros(item_ids.max() + 1, dtype=names.dtype)
+item_name_mapping_ar[item_ids] = names
+
+
+def sample_random_ranking_cases(cases=1):
+
+    for i in np.arange(cases):
+        random_sequence_index = np.random.randint(low=1, high=N_TOP_ITEMS)
+        X = input_items[random_sequence_index]
+        y = actual_items[random_sequence_index]
+        y_pred = predicted_items[random_sequence_index]
+
+        X_names = item_name_mapping_ar[X]
+        y_names = item_name_mapping_ar[y][:10]
+        y_pred_names = item_name_mapping_ar[y_pred]
+
+        print("User input session items: \n   {}".format(X_names))
+        print("\nPersonalized top 10 ranked items: \n   {}".format(y_pred_names))
+        print("\nActual next item in user session: \n   {}".format(y_names))
+        print("\n————————————————————————————————————————————————\n")
+
+
+sample_random_ranking_cases(cases=2)
+
+
+####################################################################################################
+
+# import itertools
+# import collections
+#
+#
+# t0 = time.time()
+#
+# combinations = [
+#     list(itertools.product(X_test[row][np.nonzero(X_test[row])], predicted_sequences[row]))
+#     for row in X_test
+# ]
+#
+# combinations = np.vstack(combinations)
+# combinations_counter_dict = dict(collections.Counter(map(tuple, combinations)))
+#
+# {k: v for k, v in sorted(combinations_counter_dict.items(), key=lambda item: item[1], reverse=True)}
+#
+# print("{}".format(time.time() - t0))
